@@ -1,0 +1,115 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:13
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_DB: db123
+          POSTGRES_USER: admin
+          POSTGRES_PASSWORD: admin123
+        options: >-
+          --health-cmd "pg_isready -U admin -d db123"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Set environment variables for tests
+        run: |
+          echo "DB_HOST=localhost" >> $GITHUB_ENV
+          echo "DB_PORT=5432" >> $GITHUB_ENV
+          echo "DB_USER=admin" >> $GITHUB_ENV
+          echo "DB_PASSWORD=admin123" >> $GITHUB_ENV
+          echo "DB_NAME=db123" >> $GITHUB_ENV
+
+      - name: Run tests
+        run: npm test
+
+      - name: Install Semgrep
+        run: |
+          pip install semgrep
+
+      - name: Run Semgrep SAST
+        run: |
+          semgrep --config=./semgrep.yml .
+
+      - name: Verify code formatting
+        run: |
+          npx prettier --check .
+          npx prettier --write .
+
+      - name: Generate Test Coverage Report
+        run: npm test -- --coverage
+
+      - name: Upload Coverage Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+      - name: Run ESLint
+        run: npx eslint .
+
+      - name: Run npm audit
+        run: npm audit --audit-level=moderate
+
+  docker-build-and-push:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Image Tags
+        run: |
+          echo "IMAGE_TAG=ghcr.io/intrastellarltd/crudapi-app:${{ github.sha }}" >> $GITHUB_ENV
+          echo "IMAGE_TAG_LATEST=ghcr.io/intrastellarltd/crudapi-app:latest" >> $GITHUB_ENV
+
+      - name: Build Docker Image
+        run: |
+          docker build -t $IMAGE_TAG -t $IMAGE_TAG_LATEST .
+
+      - name: Scan image
+        uses: anchore/scan-action@v6
+        with:
+          image: "ghcr.io/intrastellarltd/crudapi-app:latest"
+          fail-build: false
+
+      - uses: anchore/sbom-action@v0
+        with:
+          image: "ghcr.io/intrastellarltd/crudapi-app:latest"
+
+      - name: Push Docker Image to GHCR
+        run: |
+          docker push $IMAGE_TAG
+          docker push $IMAGE_TAG_LATEST
